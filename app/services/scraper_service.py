@@ -19,6 +19,7 @@ from app.utils.http_client import ScraperHttpClient
 
 logger = logging.getLogger(__name__)
 ACTIVE_MATCH_STATUSES = (MatchStatus.LIVE, MatchStatus.HALF_TIME, MatchStatus.EXTRA_TIME, MatchStatus.PENALTIES)
+EXPIRED_ACTIVE_STATUS_DETAIL = "Stale live status expired"
 
 
 class ParserError(ValueError):
@@ -121,6 +122,11 @@ class ScraperService:
             logger.exception("Schedule scrape failed")
 
     def scrape_live_matches(self, db: Session) -> None:
+        expired = expire_stale_active_matches(db, self.settings.live_score_window_after_minutes)
+        if expired:
+            db.commit()
+            logger.info("Expired %d stale active match(es)", expired)
+
         if self.settings.live_score_provider == "espn_worldcup":
             self.scrape_espn_scoreboard(db)
             return
@@ -477,7 +483,7 @@ def get_candidate_live_matches(
         select(Match)
         .where(
             or_(
-                Match.status.in_(ACTIVE_MATCH_STATUSES),
+                and_(Match.status.in_(ACTIVE_MATCH_STATUSES), Match.match_date >= start, Match.match_date <= end),
                 and_(Match.status == MatchStatus.SCHEDULED, Match.match_date >= start, Match.match_date <= end),
             )
         )
@@ -486,6 +492,25 @@ def get_candidate_live_matches(
     if competition:
         stmt = stmt.where(Match.competition == competition)
     return list(db.scalars(stmt))
+
+
+def expire_stale_active_matches(db: Session, after_minutes: int) -> int:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=after_minutes)
+    matches = list(
+        db.scalars(
+            select(Match).where(
+                Match.status.in_(ACTIVE_MATCH_STATUSES),
+                Match.match_date < cutoff,
+            )
+        )
+    )
+    now = datetime.now(timezone.utc)
+    for match in matches:
+        match.status = MatchStatus.UNKNOWN
+        match.status_detail = EXPIRED_ACTIVE_STATUS_DETAIL
+        match.minute = None
+        match.last_scraped_at = now
+    return len(matches)
 
 
 def get_candidate_scoreboard_dates(

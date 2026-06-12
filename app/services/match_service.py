@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.orm import Session, joinedload, selectinload
@@ -10,6 +10,7 @@ from app.schemas.match_schema import StandingRead
 
 
 ACTIVE_MATCH_STATUSES = (MatchStatus.LIVE, MatchStatus.HALF_TIME, MatchStatus.EXTRA_TIME, MatchStatus.PENALTIES)
+LIVE_MATCH_LOOKBACK_MINUTES = 360
 
 
 def get_matches(
@@ -24,7 +25,10 @@ def get_matches(
     stmt = _match_query().order_by(Match.match_date.asc())
 
     if status == MatchStatus.LIVE:
-        stmt = stmt.where(Match.status.in_(ACTIVE_MATCH_STATUSES))
+        stmt = stmt.where(
+            Match.status.in_(ACTIVE_MATCH_STATUSES),
+            Match.match_date >= _active_match_cutoff(),
+        )
     elif status:
         stmt = stmt.where(Match.status == status)
     if competition:
@@ -52,7 +56,10 @@ def get_todays_matches(db: Session) -> list[Match]:
 def get_live_matches(db: Session) -> list[Match]:
     stmt = (
         _match_query()
-        .where(Match.status.in_(ACTIVE_MATCH_STATUSES))
+        .where(
+            Match.status.in_(ACTIVE_MATCH_STATUSES),
+            Match.match_date >= _active_match_cutoff(),
+        )
         .order_by(Match.match_date.asc())
     )
     return list(db.scalars(stmt).unique())
@@ -145,3 +152,7 @@ def _match_query() -> Select[tuple[Match]]:
         joinedload(Match.winner_team),
         selectinload(Match.events),
     )
+
+
+def _active_match_cutoff() -> datetime:
+    return datetime.now(timezone.utc) - timedelta(minutes=LIVE_MATCH_LOOKBACK_MINUTES)

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import create_engine
@@ -9,10 +9,11 @@ from app.models.match import Match, MatchCompetition, MatchStatus
 from app.models.scrape_run import ScrapeRun, ScrapeRunStatus
 from app.models.team import Team
 from app.models.worker_heartbeat import WorkerHeartbeat
-from app.services.match_service import get_group_standings
+from app.services.match_service import get_group_standings, get_live_matches, get_matches
 from app.services.providers.espn_worldcup import parse_espn_scoreboard_html
 from app.services.scraping_status_service import get_scraping_status
 from app.services.scraper_service import (
+    expire_stale_active_matches,
     get_espn_scoreboard_targets,
     get_or_create_team,
     is_friendly_for_tracked_team,
@@ -215,6 +216,86 @@ def test_espn_targets_use_candidate_competition() -> None:
         assert targets == [(datetime.now(timezone.utc).date(), "https://example.com/friendly")]
 
 
+def test_live_matches_ignore_stale_active_status() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+
+    with Session(engine) as db:
+        home = get_or_create_team(db, "Argentina")
+        away = get_or_create_team(db, "Honduras")
+        db.add_all(
+            [
+                Match(
+                    external_id="stale-live",
+                    source_url="https://example.com/stale-live",
+                    home_team=home,
+                    away_team=away,
+                    match_date=now - timedelta(days=4),
+                    status=MatchStatus.LIVE,
+                    status_detail="First Half - 1'",
+                    minute=1,
+                    last_scraped_at=now - timedelta(days=4),
+                ),
+                Match(
+                    external_id="current-live",
+                    source_url="https://example.com/current-live",
+                    home_team=home,
+                    away_team=away,
+                    match_date=now,
+                    status=MatchStatus.LIVE,
+                    status_detail="First Half - 12'",
+                    minute=12,
+                    last_scraped_at=now,
+                ),
+            ]
+        )
+        db.commit()
+
+        assert [match.external_id for match in get_live_matches(db)] == ["current-live"]
+        assert [match.external_id for match in get_matches(db, status=MatchStatus.LIVE)] == ["current-live"]
+
+
+def test_expire_stale_active_matches_marks_unknown() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = datetime.now(timezone.utc)
+
+    with Session(engine) as db:
+        home = get_or_create_team(db, "Argentina")
+        away = get_or_create_team(db, "Honduras")
+        stale = Match(
+            external_id="stale-live",
+            source_url="https://example.com/stale-live",
+            home_team=home,
+            away_team=away,
+            match_date=now - timedelta(hours=5),
+            status=MatchStatus.LIVE,
+            status_detail="First Half - 1'",
+            minute=1,
+            last_scraped_at=now - timedelta(hours=5),
+        )
+        current = Match(
+            external_id="current-live",
+            source_url="https://example.com/current-live",
+            home_team=home,
+            away_team=away,
+            match_date=now,
+            status=MatchStatus.LIVE,
+            status_detail="First Half - 12'",
+            minute=12,
+            last_scraped_at=now,
+        )
+        db.add_all([stale, current])
+        db.commit()
+
+        assert expire_stale_active_matches(db, after_minutes=240) == 1
+        assert stale.status == MatchStatus.UNKNOWN
+        assert stale.status_detail == "Stale live status expired"
+        assert stale.minute is None
+        assert current.status == MatchStatus.LIVE
+
+
 def test_scraping_status_with_heartbeat_and_run() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -248,6 +329,8 @@ def main() -> None:
     test_group_standings_include_scheduled_teams()
     test_friendly_tracking_upsert()
     test_espn_targets_use_candidate_competition()
+    test_live_matches_ignore_stale_active_status()
+    test_expire_stale_active_matches_marks_unknown()
     test_scraping_status_with_heartbeat_and_run()
     print("unit tests passed")
 
