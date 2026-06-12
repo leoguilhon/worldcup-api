@@ -9,7 +9,7 @@ from app.models.match import Match, MatchCompetition, MatchStatus
 from app.models.scrape_run import ScrapeRun, ScrapeRunStatus
 from app.models.team import Team
 from app.models.worker_heartbeat import WorkerHeartbeat
-from app.services.match_service import get_group_standings, get_live_matches, get_matches
+from app.services.match_service import get_group_standings, get_groups, get_live_matches, get_matches
 from app.services.providers.espn_worldcup import parse_espn_scoreboard_html
 from app.services.scraping_status_service import get_scraping_status
 from app.services.scraper_service import (
@@ -155,6 +155,68 @@ def test_group_standings_include_scheduled_teams() -> None:
         assert {row.team.name for row in standings} == {"Mexico", "South Africa", "South Korea", "Spain"}
         assert all(row.played == 0 for row in standings)
         assert all(row.points == 0 for row in standings)
+
+
+def test_group_standings_only_use_group_stage_matches() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        teams = [
+            Team(name="Mexico", country_code="MX"),
+            Team(name="South Africa", country_code="ZA"),
+            Team(name="France", country_code="FR"),
+            Team(name="Germany", country_code="DE"),
+        ]
+        db.add_all(teams)
+        db.flush()
+        db.add_all(
+            [
+                Match(
+                    external_id="group-stage",
+                    competition=MatchCompetition.WORLD_CUP,
+                    source_url="https://example.com/group-stage",
+                    home_team=teams[0],
+                    away_team=teams[1],
+                    group_name="A",
+                    stage="Group Stage",
+                    match_date=datetime(2026, 6, 11, tzinfo=timezone.utc),
+                    status=MatchStatus.FINISHED,
+                    home_score=1,
+                    away_score=0,
+                ),
+                Match(
+                    external_id="bad-knockout-group",
+                    competition=MatchCompetition.WORLD_CUP,
+                    source_url="https://example.com/bad-knockout-group",
+                    home_team=teams[2],
+                    away_team=teams[3],
+                    group_name="A",
+                    stage="Round of 32",
+                    match_date=datetime(2026, 6, 29, tzinfo=timezone.utc),
+                    status=MatchStatus.FINISHED,
+                    home_score=4,
+                    away_score=0,
+                ),
+                Match(
+                    external_id="bad-knockout-only",
+                    competition=MatchCompetition.WORLD_CUP,
+                    source_url="https://example.com/bad-knockout-only",
+                    home_team=teams[2],
+                    away_team=teams[3],
+                    group_name="Z",
+                    stage="Round of 16",
+                    match_date=datetime(2026, 7, 4, tzinfo=timezone.utc),
+                    status=MatchStatus.FINISHED,
+                    home_score=2,
+                    away_score=1,
+                ),
+            ]
+        )
+        db.commit()
+
+        standings = get_group_standings(db, "A")
+        assert [row.team.name for row in standings] == ["Mexico", "South Africa"]
+        assert get_groups(db) == ["A"]
 
 
 def test_friendly_tracking_upsert() -> None:
@@ -327,6 +389,7 @@ def main() -> None:
     test_country_codes_and_placeholders()
     test_group_standings()
     test_group_standings_include_scheduled_teams()
+    test_group_standings_only_use_group_stage_matches()
     test_friendly_tracking_upsert()
     test_espn_targets_use_candidate_competition()
     test_live_matches_ignore_stale_active_status()

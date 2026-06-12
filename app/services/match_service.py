@@ -10,6 +10,7 @@ from app.schemas.match_schema import StandingRead
 
 
 ACTIVE_MATCH_STATUSES = (MatchStatus.LIVE, MatchStatus.HALF_TIME, MatchStatus.EXTRA_TIME, MatchStatus.PENALTIES)
+GROUP_STAGE_NAME = "Group Stage"
 LIVE_MATCH_LOOKBACK_MINUTES = 360
 
 
@@ -66,12 +67,22 @@ def get_live_matches(db: Session) -> list[Match]:
 
 
 def get_groups(db: Session) -> list[str]:
-    stmt = select(Match.group_name).where(Match.group_name.is_not(None)).distinct().order_by(Match.group_name)
+    stmt = (
+        select(Match.group_name)
+        .where(Match.group_name.is_not(None), Match.stage == GROUP_STAGE_NAME)
+        .distinct()
+        .order_by(Match.group_name)
+    )
     return [group for group in db.scalars(stmt) if group]
 
 
 def get_group_standings(db: Session, group_name: str) -> list[StandingRead]:
-    matches = get_matches(db, group_name=group_name, competition=MatchCompetition.WORLD_CUP)
+    matches = get_matches(
+        db,
+        group_name=group_name,
+        stage=GROUP_STAGE_NAME,
+        competition=MatchCompetition.WORLD_CUP,
+    )
     table: dict[int, dict[str, int | Team]] = {}
 
     for match in matches:

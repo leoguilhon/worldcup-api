@@ -151,6 +151,8 @@ CANCELLED
 UNKNOWN
 ```
 
+`stage` separa fase de grupos e mata-mata. Jogos de grupo usam `stage=Group Stage` e `group_name` com a letra do grupo (`A` a `L`). Jogos eliminatorios usam `stage` como `Round of 32`, `Round of 16`, `Quarterfinals`, `Semifinals`, `Third Place` ou `Final`, normalmente sem `group_name`.
+
 ### MatchEvent
 
 Representa eventos persistidos de uma partida.
@@ -371,7 +373,11 @@ GET /groups
 GET /groups/{group_name}/standings
 ```
 
-`/groups/{group_name}/standings` ja retorna as selecoes do grupo antes dos jogos, com pontuacao zerada. Conforme jogos `FINISHED` entram no banco, a tabela recalcula:
+`/groups` lista apenas grupos da fase de grupos (`stage=Group Stage`).
+
+`/groups/{group_name}/standings` ja retorna as selecoes do grupo antes dos jogos, com pontuacao zerada. A classificacao considera somente jogos da Copa com `stage=Group Stage` e o `group_name` solicitado; partidas de mata-mata nao entram no calculo mesmo que algum dado importado venha com `group_name` preenchido por engano.
+
+Conforme jogos `FINISHED` da fase de grupos entram no banco, a tabela recalcula:
 
 ```text
 played
@@ -521,6 +527,7 @@ placar de penaltis quando exposto
 eventos de gol
 country_code e placeholders
 standings com times zerados
+standings limitados a jogos da fase de grupos
 descoberta de amistosos
 targets de scraping por competicao
 scraping/status com heartbeat e scrape run
