@@ -338,16 +338,18 @@ def upsert_match(db: Session, item: ScrapedMatch, scrape_status: ScrapeStatus) -
     match.group_name = item.group_name
     match.stage = item.stage
     match.match_date = item.match_date
-    match.status = item.status
-    match.status_detail = item.status_detail
-    match.home_score = item.home_score
-    match.away_score = item.away_score
-    match.home_penalty_score = item.home_penalty_score
-    match.away_penalty_score = item.away_penalty_score
-    match.minute = item.minute
-    match.winner_team = get_or_create_team(db, item.winner_team) if item.winner_team else None
-    match.last_scraped_at = datetime.now(timezone.utc)
-    match.scrape_status = scrape_status
+    preserve_live_fields = item.espn_event_id is None and match.espn_event_id is not None
+    if not preserve_live_fields:
+        match.status = item.status
+        match.status_detail = item.status_detail
+        match.home_score = item.home_score
+        match.away_score = item.away_score
+        match.home_penalty_score = item.home_penalty_score
+        match.away_penalty_score = item.away_penalty_score
+        match.minute = item.minute
+        match.winner_team = get_or_create_team(db, item.winner_team) if item.winner_team else None
+        match.last_scraped_at = datetime.now(timezone.utc)
+        match.scrape_status = scrape_status
     return match
 
 
@@ -475,8 +477,9 @@ def get_candidate_live_matches(
     before_minutes: int,
     after_minutes: int,
     competition: MatchCompetition | None = None,
+    now: datetime | None = None,
 ) -> list[Match]:
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     start = now - timedelta(minutes=before_minutes)
     end = now + timedelta(minutes=after_minutes)
     stmt = (
@@ -518,9 +521,22 @@ def get_candidate_scoreboard_dates(
     before_minutes: int,
     after_minutes: int,
     competition: MatchCompetition | None = None,
+    now: datetime | None = None,
 ) -> set:
-    matches = get_candidate_live_matches(db, before_minutes, after_minutes, competition)
-    return {match.match_date.astimezone(timezone.utc).date() for match in matches}
+    matches = get_candidate_live_matches(
+        db,
+        before_minutes,
+        after_minutes,
+        competition=competition,
+        now=now,
+    )
+    dates = set()
+    for match in matches:
+        match_date = match.match_date.astimezone(timezone.utc)
+        dates.add(match_date.date())
+        dates.add((match_date - timedelta(days=1)).date())
+        dates.add((match_date + timedelta(days=1)).date())
+    return dates
 
 
 def has_active_matches(db: Session) -> bool:

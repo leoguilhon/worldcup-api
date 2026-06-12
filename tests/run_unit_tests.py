@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.database import Base
-from app.models.match import Match, MatchCompetition, MatchStatus
+from app.models.match import Match, MatchCompetition, MatchStatus, ScrapeStatus
 from app.models.scrape_run import ScrapeRun, ScrapeRunStatus
 from app.models.team import Team
 from app.models.worker_heartbeat import WorkerHeartbeat
@@ -13,10 +13,13 @@ from app.services.match_service import get_group_standings, get_groups, get_live
 from app.services.providers.espn_worldcup import parse_espn_scoreboard_html
 from app.services.scraping_status_service import get_scraping_status
 from app.services.scraper_service import (
+    ScrapedMatch,
     expire_stale_active_matches,
+    get_candidate_scoreboard_dates,
     get_espn_scoreboard_targets,
     get_or_create_team,
     is_friendly_for_tracked_team,
+    upsert_match,
     upsert_espn_friendly,
 )
 
@@ -275,7 +278,103 @@ def test_espn_targets_use_candidate_competition() -> None:
             include_friendlies=True,
         )
 
-        assert targets == [(datetime.now(timezone.utc).date(), "https://example.com/friendly")]
+        today = datetime.now(timezone.utc).date()
+        assert targets == [
+            (today - timedelta(days=1), "https://example.com/friendly"),
+            (today, "https://example.com/friendly"),
+            (today + timedelta(days=1), "https://example.com/friendly"),
+        ]
+
+
+def test_scoreboard_dates_include_adjacent_utc_dates() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = datetime(2026, 6, 12, 2, 30, tzinfo=timezone.utc)
+
+    with Session(engine) as db:
+        home = get_or_create_team(db, "South Korea")
+        away = get_or_create_team(db, "Czech Republic")
+        db.add(
+            Match(
+                external_id="utc-boundary",
+                espn_event_id="760414",
+                competition=MatchCompetition.WORLD_CUP,
+                source_url="https://example.com/utc-boundary",
+                home_team=home,
+                away_team=away,
+                match_date=datetime(2026, 6, 12, 2, tzinfo=timezone.utc),
+                status=MatchStatus.SCHEDULED,
+            )
+        )
+        db.commit()
+
+        dates = get_candidate_scoreboard_dates(
+            db,
+            before_minutes=180,
+            after_minutes=240,
+            competition=MatchCompetition.WORLD_CUP,
+            now=now,
+        )
+
+        assert dates == {
+            datetime(2026, 6, 11, tzinfo=timezone.utc).date(),
+            datetime(2026, 6, 12, tzinfo=timezone.utc).date(),
+            datetime(2026, 6, 13, tzinfo=timezone.utc).date(),
+        }
+
+
+def test_schedule_upsert_preserves_espn_live_fields() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    live_scraped_at = datetime(2026, 6, 12, 2, 35, tzinfo=timezone.utc)
+
+    with Session(engine) as db:
+        home = get_or_create_team(db, "South Korea")
+        away = get_or_create_team(db, "Czech Republic")
+        match = Match(
+            external_id="wikipedia-2026-match-002",
+            espn_event_id="760414",
+            competition=MatchCompetition.WORLD_CUP,
+            source_url="https://www.espn.com/soccer/match/_/gameId/760414",
+            home_team=home,
+            away_team=away,
+            group_name="A",
+            stage="Group Stage",
+            match_date=datetime(2026, 6, 12, 2, tzinfo=timezone.utc),
+            status=MatchStatus.LIVE,
+            status_detail="First Half - 35'",
+            home_score=0,
+            away_score=0,
+            minute=35,
+            last_scraped_at=live_scraped_at,
+        )
+        db.add(match)
+        db.commit()
+        preserved_scraped_at = match.last_scraped_at
+
+        upsert_match(
+            db,
+            ScrapedMatch(
+                external_id="wikipedia-2026-match-002",
+                source_url="https://en.wikipedia.org/wiki/2026_FIFA_World_Cup_Group_A#South_Korea_vs_Czech_Republic",
+                home_team="South Korea",
+                away_team="Czech Republic",
+                match_date=datetime(2026, 6, 12, 2, tzinfo=timezone.utc),
+                group_name="A",
+                stage="Group Stage",
+                status=MatchStatus.SCHEDULED,
+            ),
+            ScrapeStatus.SUCCESS,
+        )
+        db.commit()
+
+        assert match.status == MatchStatus.LIVE
+        assert match.status_detail == "First Half - 35'"
+        assert match.home_score == 0
+        assert match.away_score == 0
+        assert match.minute == 35
+        assert match.last_scraped_at == preserved_scraped_at
+        assert match.source_url == "https://en.wikipedia.org/wiki/2026_FIFA_World_Cup_Group_A#South_Korea_vs_Czech_Republic"
 
 
 def test_live_matches_ignore_stale_active_status() -> None:
@@ -392,6 +491,8 @@ def main() -> None:
     test_group_standings_only_use_group_stage_matches()
     test_friendly_tracking_upsert()
     test_espn_targets_use_candidate_competition()
+    test_scoreboard_dates_include_adjacent_utc_dates()
+    test_schedule_upsert_preserves_espn_live_fields()
     test_live_matches_ignore_stale_active_status()
     test_expire_stale_active_matches_marks_unknown()
     test_scraping_status_with_heartbeat_and_run()
